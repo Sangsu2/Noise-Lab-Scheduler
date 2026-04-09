@@ -1,7 +1,7 @@
 import streamlit as st
 import json
 import os
-from datetime import datetime, date
+from datetime import date
 import calendar
 
 # ── 페이지 설정 ──────────────────────────────────────────────
@@ -12,11 +12,8 @@ st.set_page_config(
 )
 
 # ── 비밀번호 설정 ─────────────────────────────────────────────
-# .streamlit/secrets.toml 에 설정된 비밀번호 사용
-# 없을 경우 기본값 "lge1234" 사용
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "lge1234")
 
-# ── 로그인 체크 ───────────────────────────────────────────────
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
@@ -28,7 +25,6 @@ if not st.session_state.authenticated:
         <p style='color:#888;margin-bottom:32px'>접속하려면 비밀번호를 입력하세요</p>
     </div>
     """, unsafe_allow_html=True)
-
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         pw_input = st.text_input("비밀번호", type="password", placeholder="비밀번호 입력")
@@ -40,17 +36,8 @@ if not st.session_state.authenticated:
                 st.error("비밀번호가 올바르지 않습니다.")
     st.stop()
 
-# ── 슬롯 정의 ────────────────────────────────────────────────
-SLOTS = [
-    {"id": 0, "label": "1타임", "time": "08:00 ~ 12:00"},
-    {"id": 1, "label": "2타임", "time": "12:00 ~ 16:00"},
-    {"id": 2, "label": "3타임", "time": "16:00 ~ 20:00"},
-    {"id": 3, "label": "4타임", "time": "20:00 ~ 24:00"},
-    {"id": 4, "label": "5타임", "time": "00:00 ~ 04:00"},
-    {"id": 5, "label": "6타임", "time": "04:00 ~ 08:00"},
-]
-
-SLOT_COLORS = ["#7F77DD", "#1D9E75", "#D85A30", "#D4537E", "#378ADD", "#639922"]
+# ── 시간 목록 ────────────────────────────────────────────────
+HOURS = [f"{h:02d}:00" for h in range(0, 25)]  # 00:00 ~ 24:00
 
 DATA_FILE = "bookings.json"
 
@@ -61,26 +48,51 @@ def load_bookings():
             return json.load(f)
     return {}
 
-def save_bookings(bookings):
+def save_bookings(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(bookings, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def date_key(y, m, d):
     return f"{y}-{str(m).zfill(2)}-{str(d).zfill(2)}"
 
+def time_to_min(t):
+    h, _ = t.split(":")
+    return int(h) * 60
+
+def is_overlap(new_start, new_end, bookings_of_day):
+    ns = time_to_min(new_start)
+    ne = time_to_min(new_end)
+    for b in bookings_of_day.values():
+        bs = time_to_min(b["start"])
+        be = time_to_min(b["end"])
+        if ns < be and ne > bs:
+            return True, b
+    return False, None
+
+def make_timeline(bookings_of_day):
+    """달력 셀용 미니 타임라인 HTML"""
+    if not bookings_of_day:
+        return ""
+    items = sorted(bookings_of_day.values(), key=lambda x: time_to_min(x["start"]))
+    html = ""
+    for b in items[:2]:
+        html += f'<div style="background:#7F77DD;color:white;border-radius:4px;padding:1px 4px;font-size:10px;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{b["start"]}~{b["end"]} {b["name"]}</div>'
+    if len(items) > 2:
+        html += f'<div style="font-size:10px;color:#888">+{len(items)-2}건</div>'
+    return html
+
 # ── 세션 초기화 ──────────────────────────────────────────────
-if "view" not in st.session_state:
-    st.session_state.view = "cal"
-if "sel_year" not in st.session_state:
-    st.session_state.sel_year = date.today().year
-if "sel_month" not in st.session_state:
-    st.session_state.sel_month = date.today().month
-if "sel_date" not in st.session_state:
-    st.session_state.sel_date = None
-if "sel_slot" not in st.session_state:
-    st.session_state.sel_slot = None
-if "bookings" not in st.session_state:
-    st.session_state.bookings = load_bookings()
+defaults = {
+    "view": "cal",
+    "sel_year": date.today().year,
+    "sel_month": date.today().month,
+    "sel_date": None,
+    "sel_booking_id": None,
+    "bookings": load_bookings(),
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 bookings = st.session_state.bookings
 
@@ -89,19 +101,13 @@ st.markdown("""
 <style>
 #MainMenu, footer, header {visibility: hidden;}
 .block-container {padding-top: 1.5rem; padding-bottom: 1rem;}
-.slot-badge {
-    border-radius: 4px; padding: 2px 5px;
-    font-size: 11px; margin-bottom: 2px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    color: white;
-}
 </style>
 """, unsafe_allow_html=True)
 
 MONTHS_KR = ["1월","2월","3월","4월","5월","6월","7월","8월","9월","10월","11월","12월"]
 DAYS_KR = ["월","화","수","목","금","토","일"]
 
-# ── 로그아웃 버튼 ─────────────────────────────────────────────
+# ── 사이드바 ─────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🔇 소음 시험실 예약")
     st.divider()
@@ -139,6 +145,7 @@ if st.session_state.view == "cal":
 
     st.divider()
 
+    # 요일 헤더
     day_cols = st.columns(7)
     for i, d in enumerate(DAYS_KR):
         color = "#e53935" if i == 6 else "#1565C0" if i == 5 else "#333"
@@ -158,26 +165,17 @@ if st.session_state.view == "cal":
                 key = date_key(y, m, day)
                 day_bookings = bookings.get(key, {})
                 is_today = (y == today.year and m == today.month and day == today.day)
-
                 num_color = "#e53935" if wi == 6 else "#1565C0" if wi == 5 else "#333"
                 today_style = "background:#534AB7;color:white;border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;" if is_today else f"color:{num_color}"
 
-                badges_html = ""
-                for sid_str, info in list(day_bookings.items())[:3]:
-                    sid = int(sid_str)
-                    color = SLOT_COLORS[sid % len(SLOT_COLORS)]
-                    label = SLOTS[sid]["label"]
-                    name = info.get("name", "")
-                    badges_html += f'<div class="slot-badge" style="background:{color}">{label} {name}</div>'
-                if len(day_bookings) > 3:
-                    badges_html += f'<div class="slot-badge" style="background:#888">+{len(day_bookings)-3}건</div>'
+                timeline_html = make_timeline(day_bookings)
 
                 st.markdown(f"""
                 <div style='border:1px solid #e0e0e0;border-radius:8px;padding:6px;min-height:90px;background:white'>
                     <div style='font-weight:600;font-size:14px;margin-bottom:4px'>
                         <span style='{today_style}'>{day}</span>
                     </div>
-                    {badges_html}
+                    {timeline_html}
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -187,7 +185,7 @@ if st.session_state.view == "cal":
                     st.rerun()
 
 # ════════════════════════════════════════════════════════════
-# 뷰 2: 날짜별 슬롯
+# 뷰 2: 날짜별 예약 현황 + 예약 폼
 # ════════════════════════════════════════════════════════════
 elif st.session_state.view == "day":
     y = st.session_state.sel_year
@@ -200,82 +198,102 @@ elif st.session_state.view == "day":
         st.session_state.view = "cal"
         st.rerun()
 
-    st.markdown(f"## {y}년 {MONTHS_KR[m-1]} {d}일 예약 현황")
+    st.markdown(f"## {y}년 {MONTHS_KR[m-1]} {d}일")
     st.divider()
 
-    for slot in SLOTS:
-        sid = str(slot["id"])
-        info = day_bookings.get(sid)
+    # ── 타임라인 시각화 ──────────────────────────────────────
+    st.markdown("#### 예약 현황")
 
-        col1, col2, col3 = st.columns([3, 4, 2])
-        with col1:
-            st.markdown(f"**{slot['label']}** &nbsp; `{slot['time']}`")
-        with col2:
-            if info:
-                st.markdown(f"👤 {info['name']} &nbsp;·&nbsp; 📦 {info['product']}")
-            else:
-                st.markdown("<span style='color:#aaa'>예약 가능</span>", unsafe_allow_html=True)
-        with col3:
-            if info:
-                if st.button("예약 취소", key=f"del_{sid}", type="secondary"):
-                    del bookings[key][sid]
+    if day_bookings:
+        # 24시간 타임라인 바
+        timeline_html = '<div style="position:relative;height:40px;background:#f0f0f0;border-radius:8px;margin-bottom:8px;overflow:hidden">'
+        colors = ["#7F77DD","#1D9E75","#D85A30","#D4537E","#378ADD","#639922","#BA7517","#A32D2D"]
+        for i, (bid, b) in enumerate(sorted(day_bookings.items(), key=lambda x: time_to_min(x[1]["start"]))):
+            s_pct = time_to_min(b["start"]) / 1440 * 100
+            e_pct = time_to_min(b["end"]) / 1440 * 100
+            w_pct = e_pct - s_pct
+            color = colors[i % len(colors)]
+            timeline_html += f'<div style="position:absolute;left:{s_pct:.1f}%;width:{w_pct:.1f}%;height:100%;background:{color};display:flex;align-items:center;justify-content:center;font-size:11px;color:white;overflow:hidden;white-space:nowrap;padding:0 4px">{b["name"]}</div>'
+        timeline_html += '</div>'
+        # 시간 눈금
+        timeline_html += '<div style="display:flex;justify-content:space-between;font-size:10px;color:#aaa;margin-bottom:16px">'
+        for h in [0, 6, 12, 18, 24]:
+            timeline_html += f'<span>{h:02d}:00</span>'
+        timeline_html += '</div>'
+        st.markdown(timeline_html, unsafe_allow_html=True)
+
+        # 예약 목록
+        for bid, b in sorted(day_bookings.items(), key=lambda x: time_to_min(x[1]["start"])):
+            col1, col2, col3 = st.columns([3, 4, 2])
+            with col1:
+                st.markdown(f"🕐 **{b['start']} ~ {b['end']}**")
+            with col2:
+                st.markdown(f"👤 {b['name']} &nbsp;·&nbsp; 📦 {b['product']}")
+            with col3:
+                if st.button("예약 취소", key=f"del_{bid}", type="secondary"):
+                    del bookings[key][bid]
                     if not bookings[key]:
                         del bookings[key]
                     save_bookings(bookings)
                     st.session_state.bookings = bookings
                     st.rerun()
-            else:
-                if st.button("예약하기", key=f"book_{sid}", type="primary"):
-                    st.session_state.sel_slot = slot["id"]
-                    st.session_state.view = "booking"
-                    st.rerun()
-        st.divider()
+    else:
+        st.markdown("<p style='color:#aaa'>이 날의 예약이 없습니다.</p>", unsafe_allow_html=True)
 
-# ════════════════════════════════════════════════════════════
-# 뷰 3: 예약 폼
-# ════════════════════════════════════════════════════════════
-elif st.session_state.view == "booking":
-    y = st.session_state.sel_year
-    m = st.session_state.sel_month
-    d = st.session_state.sel_date
-    sid = st.session_state.sel_slot
-    slot = SLOTS[sid]
-
-    if st.button("← 날짜로"):
-        st.session_state.view = "day"
-        st.rerun()
-
-    st.markdown(f"## 예약 등록")
-    st.markdown(f"**{y}년 {MONTHS_KR[m-1]} {d}일 · {slot['label']} {slot['time']}**")
     st.divider()
 
-    with st.form("booking_form"):
-        name = st.text_input("이름 *", placeholder="홍길동")
-        product = st.text_input("제품명 *", placeholder="제품명을 입력하세요")
+    # ── 예약 폼 ──────────────────────────────────────────────
+    st.markdown("#### 새 예약 추가")
 
+    with st.form("booking_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
-            submitted = st.form_submit_button("✅ 예약 확정", type="primary", use_container_width=True)
+            start_time = st.selectbox(
+                "시작 시간 *",
+                options=HOURS[:-1],  # 00:00 ~ 23:00
+                index=8  # 기본값 08:00
+            )
         with col2:
-            cancelled = st.form_submit_button("취소", use_container_width=True)
+            # 시작 시간 이후 옵션만
+            start_idx = HOURS.index(start_time)
+            end_options = HOURS[start_idx + 1:]  # 최소 1시간 이후
+            end_time = st.selectbox(
+                "종료 시간 *",
+                options=end_options,
+                index=min(3, len(end_options) - 1)  # 기본값 시작+4시간
+            )
+
+        col3, col4 = st.columns(2)
+        with col3:
+            name = st.text_input("이름 *", placeholder="홍길동")
+        with col4:
+            product = st.text_input("제품명 *", placeholder="제품명을 입력하세요")
+
+        submitted = st.form_submit_button("✅ 예약 확정", type="primary", use_container_width=True)
 
         if submitted:
             if not name.strip() or not product.strip():
                 st.error("모든 항목을 입력해주세요.")
             else:
-                key = date_key(y, m, d)
-                if key not in bookings:
-                    bookings[key] = {}
-                bookings[key][str(sid)] = {
-                    "name": name.strip(),
-                    "product": product.strip()
-                }
-                save_bookings(bookings)
-                st.session_state.bookings = bookings
-                st.success("예약이 완료되었습니다!")
-                st.session_state.view = "day"
-                st.rerun()
-
-        if cancelled:
-            st.session_state.view = "day"
-            st.rerun()
+                overlap, conflict = is_overlap(start_time, end_time, day_bookings)
+                if overlap:
+                    st.error(f"⚠️ {conflict['start']}~{conflict['end']} ({conflict['name']}) 예약과 시간이 겹칩니다.")
+                else:
+                    if key not in bookings:
+                        bookings[key] = {}
+                    bid = str(len(bookings[key]))
+                    # 중복 ID 방지
+                    existing_ids = set(bookings[key].keys())
+                    new_id = 0
+                    while str(new_id) in existing_ids:
+                        new_id += 1
+                    bookings[key][str(new_id)] = {
+                        "start": start_time,
+                        "end": end_time,
+                        "name": name.strip(),
+                        "product": product.strip()
+                    }
+                    save_bookings(bookings)
+                    st.session_state.bookings = bookings
+                    st.success(f"✅ {start_time} ~ {end_time} 예약이 완료되었습니다!")
+                    st.rerun()
