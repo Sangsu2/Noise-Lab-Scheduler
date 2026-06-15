@@ -142,6 +142,8 @@ defaults = {
     "sel_room": "noise",
     "edit_group_id": None,
     "bookings": {},
+    "form_start_date": date.today(),  # ← 폼 날짜 세션
+    "form_end_date":   date.today(),
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -240,90 +242,12 @@ room_info  = ROOMS[room_key]
 room_color = room_info["color"]
 room_label = room_info["label"]
 
-# ── 예약 폼 공통 함수 ─────────────────────────────────────────
-def booking_form(form_key, existing=None):
-    today   = date.today()
-    is_edit = existing is not None
-
-    if is_edit:
-        init_start_date = date_from_key(existing["start_date"])
-        init_end_date   = date_from_key(existing["end_date"])
-        init_start_time = existing["start"]
-        init_end_time   = existing["end"]
-        init_name       = existing.get("name", "")
-        init_test       = existing.get("test_name", "")
-        init_product    = existing.get("product", "")
-    else:
-        init_start_date = today
-        init_end_date   = today
-        init_start_time = HOURS[8]
-        init_end_time   = HOURS[12]
-        init_name       = ""
-        init_test       = ""
-        init_product    = ""
-
-    with st.form(form_key, clear_on_submit=not is_edit):
-        st.markdown("**📅 기간 설정**")
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("시작 날짜 *", value=init_start_date, min_value=date(2020,1,1))
-            start_time = st.selectbox("시작 시간 *", options=HOURS[:-1],
-                                      index=HOURS[:-1].index(init_start_time) if init_start_time in HOURS[:-1] else 8)
-        with col2:
-            end_date = st.date_input("종료 날짜 *", value=init_end_date, min_value=date(2020,1,1))
-            if end_date == start_date:
-                end_hour_options = HOURS[HOURS.index(start_time)+1:]
-            else:
-                end_hour_options = HOURS[1:]
-            safe_end = init_end_time if init_end_time in end_hour_options else end_hour_options[min(3, len(end_hour_options)-1)]
-            end_time = st.selectbox("종료 시간 *", options=end_hour_options,
-                                    index=end_hour_options.index(safe_end))
-
-        st.markdown("**👤 예약 정보**")
-        col3, col4 = st.columns(2)
-        with col3:
-            name      = st.text_input("이름 *", value=init_name, placeholder="홍길동")
-        with col4:
-            test_name = st.text_input("시험명 *", value=init_test, placeholder="예: 소음 내구 시험")
-        product = st.text_input("제품명 *", value=init_product, placeholder="제품명을 입력하세요")
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            submitted = st.form_submit_button(
-                "💾 수정 저장" if is_edit else "✅ 예약 확정",
-                type="primary", use_container_width=True)
-        with col_b:
-            cancelled = st.form_submit_button("취소", use_container_width=True)
-
-    if cancelled:
-        st.session_state.view = "day"
-        st.session_state.edit_group_id = None
-        st.rerun()
-
-    if submitted:
-        if not name.strip() or not test_name.strip() or not product.strip():
-            st.error("모든 항목을 입력해주세요.")
-            return False, None
-        if end_date < start_date:
-            st.error("종료 날짜는 시작 날짜 이후여야 합니다.")
-            return False, None
-        if end_date == start_date and time_to_min(end_time) <= time_to_min(start_time):
-            st.error("종료 시간은 시작 시간 이후여야 합니다.")
-            return False, None
-        return True, {
-            "start_date": date_key(start_date.year, start_date.month, start_date.day),
-            "end_date":   date_key(end_date.year,   end_date.month,   end_date.day),
-            "start": start_time, "end": end_time,
-            "name": name.strip(), "test_name": test_name.strip(), "product": product.strip(),
-        }
-    return False, None
-
+# ── 예약 저장 함수 ────────────────────────────────────────────
 def save_booking(form_data, exclude_gid=None):
     start_date = date_from_key(form_data["start_date"])
     end_date   = date_from_key(form_data["end_date"])
     slots = expand_booking_to_days(start_date, form_data["start"], end_date, form_data["end"])
 
-    # 겹침 검사
     for (dk, ds, de) in slots:
         if ds == de:
             continue
@@ -333,11 +257,9 @@ def save_booking(form_data, exclude_gid=None):
             d_label = dk.replace("-", "/")
             return False, f"⚠️ {d_label} {conflict['start']}~{conflict['end']} ({conflict['name']}) 예약과 시간이 겹칩니다."
 
-    # 기존 삭제 (수정 시)
     if exclude_gid:
         delete_by_group_id(exclude_gid)
 
-    # 저장
     gid = exclude_gid or str(uuid.uuid4())[:8]
     for (dk, ds, de) in slots:
         if ds == de:
@@ -404,12 +326,15 @@ if st.session_state.view == "cal":
                     {tl}
                 </div>""", unsafe_allow_html=True)
                 if st.button("보기" if not is_admin else "선택", key=f"day_{y}_{m}_{day}", use_container_width=True):
+                    sel = date(y, m, day)
                     st.session_state.sel_date = day
+                    st.session_state.form_start_date = sel  # ← 날짜 자동 설정
+                    st.session_state.form_end_date   = sel
                     st.session_state.view = "day"
                     st.rerun()
 
 # ════════════════════════════════════════════════════════════
-# 뷰 2: 날짜별 현황
+# 뷰 2: 날짜별 현황 + 예약 폼
 # ════════════════════════════════════════════════════════════
 elif st.session_state.view == "day":
     y  = st.session_state.sel_year
@@ -475,17 +400,68 @@ elif st.session_state.view == "day":
     else:
         st.markdown("<p style='color:#aaa'>이 날의 예약이 없습니다.</p>", unsafe_allow_html=True)
 
+    # ── 예약 폼 (관리자만) ────────────────────────────────────
     if is_admin:
         st.markdown("#### 새 예약 추가")
-        submitted, form_data = booking_form("booking_form")
-        if submitted and form_data:
-            ok, err = save_booking(form_data)
-            if ok:
-                period = f"{form_data['start_date'].replace('-','/')} {form_data['start']} ~ {form_data['end_date'].replace('-','/')} {form_data['end']}"
-                st.success(f"✅ {period} 예약이 완료되었습니다!")
-                st.rerun()
+
+        with st.form("booking_form", clear_on_submit=True):
+            st.markdown("**📅 기간 설정**")
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("시작 날짜 *",
+                    value=st.session_state.form_start_date,
+                    min_value=date(2020,1,1))
+                start_time = st.selectbox("시작 시간 *", options=HOURS[:-1], index=8)
+            with col2:
+                end_date = st.date_input("종료 날짜 *",
+                    value=st.session_state.form_end_date,
+                    min_value=date(2020,1,1))
+                if end_date == start_date:
+                    end_hour_options = HOURS[HOURS.index(start_time)+1:]
+                else:
+                    end_hour_options = HOURS[1:]
+                end_time = st.selectbox("종료 시간 *", options=end_hour_options,
+                                        index=min(3, len(end_hour_options)-1))
+
+            st.markdown("**👤 예약 정보**")
+            col3, col4 = st.columns(2)
+            with col3:
+                name      = st.text_input("이름 *", placeholder="홍길동")
+            with col4:
+                test_name = st.text_input("시험명 *", placeholder="예: 소음 내구 시험")
+            product = st.text_input("제품명 *", placeholder="제품명을 입력하세요")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                submitted = st.form_submit_button("✅ 예약 확정", type="primary", use_container_width=True)
+            with col_b:
+                cancelled = st.form_submit_button("취소", use_container_width=True)
+
+        if cancelled:
+            st.session_state.view = "cal"
+            st.rerun()
+
+        if submitted:
+            if not name.strip() or not test_name.strip() or not product.strip():
+                st.error("모든 항목을 입력해주세요.")
+            elif end_date < start_date:
+                st.error("종료 날짜는 시작 날짜 이후여야 합니다.")
+            elif end_date == start_date and time_to_min(end_time) <= time_to_min(start_time):
+                st.error("종료 시간은 시작 시간 이후여야 합니다.")
             else:
-                st.error(err)
+                form_data = {
+                    "start_date": date_key(start_date.year, start_date.month, start_date.day),
+                    "end_date":   date_key(end_date.year,   end_date.month,   end_date.day),
+                    "start": start_time, "end": end_time,
+                    "name": name.strip(), "test_name": test_name.strip(), "product": product.strip(),
+                }
+                ok, err = save_booking(form_data)
+                if ok:
+                    period = f"{form_data['start_date'].replace('-','/')} {form_data['start']} ~ {form_data['end_date'].replace('-','/')} {form_data['end']}"
+                    st.success(f"✅ {period} 예약이 완료되었습니다!")
+                    st.rerun()
+                else:
+                    st.error(err)
     else:
         st.divider()
         st.info("👤 예약 등록 및 수정은 관리자만 가능합니다.")
@@ -519,13 +495,65 @@ elif st.session_state.view == "edit":
     if not existing:
         st.warning("해당 예약을 찾을 수 없습니다.")
     else:
-        submitted, form_data = booking_form("edit_form", existing=existing)
-        if submitted and form_data:
-            ok, err = save_booking(form_data, exclude_gid=gid)
-            if ok:
-                st.success("수정이 완료되었습니다!")
-                st.session_state.view = "day"
-                st.session_state.edit_group_id = None
-                st.rerun()
+        with st.form("edit_form"):
+            st.markdown("**📅 기간 설정**")
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("시작 날짜 *",
+                    value=date_from_key(existing["start_date"]),
+                    min_value=date(2020,1,1))
+                start_time = st.selectbox("시작 시간 *", options=HOURS[:-1],
+                    index=HOURS[:-1].index(existing["start"]) if existing["start"] in HOURS[:-1] else 8)
+            with col2:
+                end_date = st.date_input("종료 날짜 *",
+                    value=date_from_key(existing["end_date"]),
+                    min_value=date(2020,1,1))
+                if end_date == start_date:
+                    end_hour_options = HOURS[HOURS.index(start_time)+1:]
+                else:
+                    end_hour_options = HOURS[1:]
+                safe_end = existing["end"] if existing["end"] in end_hour_options else end_hour_options[min(3, len(end_hour_options)-1)]
+                end_time = st.selectbox("종료 시간 *", options=end_hour_options,
+                    index=end_hour_options.index(safe_end))
+
+            st.markdown("**👤 예약 정보**")
+            col3, col4 = st.columns(2)
+            with col3:
+                name      = st.text_input("이름 *", value=existing.get("name",""))
+            with col4:
+                test_name = st.text_input("시험명 *", value=existing.get("test_name",""))
+            product = st.text_input("제품명 *", value=existing.get("product",""))
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                submitted = st.form_submit_button("💾 수정 저장", type="primary", use_container_width=True)
+            with col_b:
+                cancelled = st.form_submit_button("취소", use_container_width=True)
+
+        if cancelled:
+            st.session_state.view = "day"
+            st.session_state.edit_group_id = None
+            st.rerun()
+
+        if submitted:
+            if not name.strip() or not test_name.strip() or not product.strip():
+                st.error("모든 항목을 입력해주세요.")
+            elif end_date < start_date:
+                st.error("종료 날짜는 시작 날짜 이후여야 합니다.")
+            elif end_date == start_date and time_to_min(end_time) <= time_to_min(start_time):
+                st.error("종료 시간은 시작 시간 이후여야 합니다.")
             else:
-                st.error(err)
+                form_data = {
+                    "start_date": date_key(start_date.year, start_date.month, start_date.day),
+                    "end_date":   date_key(end_date.year,   end_date.month,   end_date.day),
+                    "start": start_time, "end": end_time,
+                    "name": name.strip(), "test_name": test_name.strip(), "product": product.strip(),
+                }
+                ok, err = save_booking(form_data, exclude_gid=gid)
+                if ok:
+                    st.success("수정이 완료되었습니다!")
+                    st.session_state.view = "day"
+                    st.session_state.edit_group_id = None
+                    st.rerun()
+                else:
+                    st.error(err)
