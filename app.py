@@ -1,8 +1,8 @@
 import streamlit as st
-import json
-import os
+from supabase import create_client, Client
 from datetime import date, timedelta
 import calendar
+import uuid
 
 # ── 페이지 설정 ──────────────────────────────────────────────
 st.set_page_config(
@@ -10,6 +10,16 @@ st.set_page_config(
     page_icon="🏢",
     layout="wide"
 )
+
+# ── Supabase 연결 ─────────────────────────────────────────────
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+
+@st.cache_resource
+def get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+supabase = get_supabase()
 
 # ── 비밀번호 설정 ─────────────────────────────────────────────
 USER_PASSWORD  = st.secrets.get("USER_PASSWORD",  "1234")
@@ -21,22 +31,54 @@ ROOMS = {
     "chamber": {"label": "🌡️ 환경 챔버",  "color": "0D9488"},
 }
 
-# ── 시간 목록 ────────────────────────────────────────────────
 HOURS = [f"{h:02d}:00" for h in range(0, 25)]
 
-DATA_FILE = "bookings.json"
+# ── DB 함수 ───────────────────────────────────────────────────
+def load_bookings_from_db():
+    res = supabase.table("bookings").select("*").execute()
+    bookings = {}
+    for row in res.data:
+        room = row["room"]
+        dk   = row["date_key"]
+        bid  = str(row["id"])
+        if room not in bookings:
+            bookings[room] = {}
+        if dk not in bookings[room]:
+            bookings[room][dk] = {}
+        bookings[room][dk][bid] = {
+            "id":         row["id"],
+            "group_id":   row["group_id"],
+            "start_date": row["start_date"],
+            "end_date":   row["end_date"],
+            "start":      row["start_time"],
+            "end":        row["end_time"],
+            "name":       row["name"],
+            "test_name":  row["test_name"],
+            "product":    row["product"],
+        }
+    return bookings
 
-# ── 데이터 로드/저장 ─────────────────────────────────────────
-def load_bookings():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+def insert_booking(room, dk, group_id, start_date, end_date, start_time, end_time, name, test_name, product):
+    supabase.table("bookings").insert({
+        "room":       room,
+        "date_key":   dk,
+        "group_id":   group_id,
+        "start_date": start_date,
+        "end_date":   end_date,
+        "start_time": start_time,
+        "end_time":   end_time,
+        "name":       name,
+        "test_name":  test_name,
+        "product":    product,
+    }).execute()
 
-def save_bookings(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def delete_by_group_id(group_id):
+    supabase.table("bookings").delete().eq("group_id", group_id).execute()
 
+def refresh_bookings():
+    st.session_state.bookings = load_bookings_from_db()
+
+# ── 유틸 함수 ─────────────────────────────────────────────────
 def date_key(y, m, d):
     return f"{y}-{str(m).zfill(2)}-{str(d).zfill(2)}"
 
@@ -47,15 +89,7 @@ def date_from_key(dk):
 def time_to_min(t):
     return int(t.split(":")[0]) * 60
 
-def datetime_to_sort_key(dk, t):
-    return dk + " " + t
-
-# ── 다중 날짜 예약 처리 ───────────────────────────────────────
 def expand_booking_to_days(start_date, start_time, end_date, end_time):
-    """
-    시작일~종료일에 걸친 예약을 날짜별 슬롯으로 분리.
-    반환: [(date_key, day_start, day_end), ...]
-    """
     slots = []
     cur = start_date
     while cur <= end_date:
@@ -85,9 +119,6 @@ def is_overlap_day(new_start, new_end, day_bookings, exclude_gid=None):
             return True, b
     return False, None
 
-def get_all_bookings_for_room(room_key):
-    return bookings.get(room_key, {})
-
 def make_timeline(day_bookings, room_color):
     if not day_bookings:
         return ""
@@ -110,21 +141,20 @@ defaults = {
     "sel_date": None,
     "sel_room": "noise",
     "edit_group_id": None,
-    "bookings": load_bookings(),
+    "bookings": {},
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-bookings = st.session_state.bookings
-
 # ── 스타일 ───────────────────────────────────────────────────
 st.markdown("""
 <style>
 #MainMenu, footer, header {visibility: hidden;}
-.block-container {padding-top: 1.5rem; padding-bottom: 1rem;}
-.admin-badge {background:#7C3AED;color:white;border-radius:12px;padding:2px 10px;font-size:12px;font-weight:600;}
-.user-badge  {background:#0D9488;color:white;border-radius:12px;padding:2px 10px;font-size:12px;font-weight:600;}
+[data-testid="collapsedControl"] {display: none;}
+.block-container {padding-top: 1rem; padding-bottom: 1rem;}
+.admin-badge {background:#7C3AED;color:white;border-radius:12px;padding:3px 12px;font-size:13px;font-weight:600;}
+.user-badge  {background:#0D9488;color:white;border-radius:12px;padding:3px 12px;font-size:13px;font-weight:600;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -149,10 +179,12 @@ if not st.session_state.authenticated:
             if pw == ADMIN_PASSWORD:
                 st.session_state.authenticated = True
                 st.session_state.is_admin = True
+                refresh_bookings()
                 st.rerun()
             elif pw == USER_PASSWORD:
                 st.session_state.authenticated = True
                 st.session_state.is_admin = False
+                refresh_bookings()
                 st.rerun()
             else:
                 st.error("비밀번호가 올바르지 않습니다.")
@@ -165,33 +197,43 @@ if not st.session_state.authenticated:
     st.stop()
 
 is_admin = st.session_state.is_admin
+bookings = st.session_state.bookings
 
-# ── 사이드바 ─────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 🏢 시험실 예약 시스템")
-    st.divider()
-    if is_admin:
-        st.markdown('<span class="admin-badge">👑 관리자</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="user-badge">👤 일반 사용자</span>', unsafe_allow_html=True)
-    st.divider()
-    st.markdown("**예약 공간 선택**")
-    selected_room = st.radio(
-        label="공간",
-        options=list(ROOMS.keys()),
-        format_func=lambda x: ROOMS[x]["label"],
-        index=list(ROOMS.keys()).index(st.session_state.sel_room),
-        label_visibility="collapsed"
-    )
-    if selected_room != st.session_state.sel_room:
-        st.session_state.sel_room = selected_room
+# ── 상단 네비게이션 바 ───────────────────────────────────────
+badge = '<span class="admin-badge">👑 관리자</span>' if is_admin else '<span class="user-badge">👤 일반 사용자</span>'
+st.markdown(f"""
+<div style='display:flex;align-items:center;justify-content:space-between;
+            background:#F8F9FB;border:1px solid #E2E8F0;border-radius:12px;
+            padding:10px 20px;margin-bottom:1rem'>
+    <div style='font-weight:700;font-size:16px;color:#1E2D6B'>🏢 시험실 예약 시스템</div>
+    <div>{badge}</div>
+</div>
+""", unsafe_allow_html=True)
+
+col_r1, col_r2, col_r3, col_r4 = st.columns([3, 3, 1, 1])
+with col_r1:
+    if st.button("🔇 소음 시험실", use_container_width=True,
+                 type="primary" if st.session_state.sel_room == "noise" else "secondary"):
+        st.session_state.sel_room = "noise"
         st.session_state.view = "cal"
         st.rerun()
-    st.divider()
+with col_r2:
+    if st.button("🌡️ 환경 챔버", use_container_width=True,
+                 type="primary" if st.session_state.sel_room == "chamber" else "secondary"):
+        st.session_state.sel_room = "chamber"
+        st.session_state.view = "cal"
+        st.rerun()
+with col_r3:
+    if st.button("🔄 새로고침", use_container_width=True):
+        refresh_bookings()
+        st.rerun()
+with col_r4:
     if st.button("🔒 로그아웃", use_container_width=True):
-        for k in ["authenticated","is_admin","view","sel_date","edit_group_id"]:
+        for k in ["authenticated","is_admin","view","sel_date","edit_group_id","bookings"]:
             st.session_state[k] = defaults[k]
         st.rerun()
+
+st.divider()
 
 room_key   = st.session_state.sel_room
 room_info  = ROOMS[room_key]
@@ -200,12 +242,7 @@ room_label = room_info["label"]
 
 # ── 예약 폼 공통 함수 ─────────────────────────────────────────
 def booking_form(form_key, existing=None):
-    """
-    예약 등록/수정 공통 폼.
-    existing: 수정 시 기존 데이터 dict
-    반환: (submitted, form_data) or (False, None)
-    """
-    today = date.today()
+    today   = date.today()
     is_edit = existing is not None
 
     if is_edit:
@@ -219,8 +256,8 @@ def booking_form(form_key, existing=None):
     else:
         init_start_date = today
         init_end_date   = today
-        init_start_time = HOURS[8]   # 08:00
-        init_end_time   = HOURS[12]  # 12:00
+        init_start_time = HOURS[8]
+        init_end_time   = HOURS[12]
         init_name       = ""
         init_test       = ""
         init_product    = ""
@@ -234,11 +271,10 @@ def booking_form(form_key, existing=None):
                                       index=HOURS[:-1].index(init_start_time) if init_start_time in HOURS[:-1] else 8)
         with col2:
             end_date = st.date_input("종료 날짜 *", value=init_end_date, min_value=date(2020,1,1))
-            # 같은 날이면 시작 이후 시간만, 다른 날이면 전체
             if end_date == start_date:
                 end_hour_options = HOURS[HOURS.index(start_time)+1:]
             else:
-                end_hour_options = HOURS[1:]  # 00:00 제외
+                end_hour_options = HOURS[1:]
             safe_end = init_end_time if init_end_time in end_hour_options else end_hour_options[min(3, len(end_hour_options)-1)]
             end_time = st.selectbox("종료 시간 *", options=end_hour_options,
                                     index=end_hour_options.index(safe_end))
@@ -246,28 +282,25 @@ def booking_form(form_key, existing=None):
         st.markdown("**👤 예약 정보**")
         col3, col4 = st.columns(2)
         with col3:
-            name    = st.text_input("이름 *", value=init_name, placeholder="홍길동")
+            name      = st.text_input("이름 *", value=init_name, placeholder="홍길동")
         with col4:
             test_name = st.text_input("시험명 *", value=init_test, placeholder="예: 소음 내구 시험")
-
         product = st.text_input("제품명 *", value=init_product, placeholder="제품명을 입력하세요")
 
         col_a, col_b = st.columns(2)
         with col_a:
             submitted = st.form_submit_button(
                 "💾 수정 저장" if is_edit else "✅ 예약 확정",
-                type="primary", use_container_width=True
-            )
+                type="primary", use_container_width=True)
         with col_b:
             cancelled = st.form_submit_button("취소", use_container_width=True)
 
     if cancelled:
-        st.session_state.view = "day" if is_edit else "day"
+        st.session_state.view = "day"
         st.session_state.edit_group_id = None
         st.rerun()
 
     if submitted:
-        # 유효성 검사
         if not name.strip() or not test_name.strip() or not product.strip():
             st.error("모든 항목을 입력해주세요.")
             return False, None
@@ -277,74 +310,46 @@ def booking_form(form_key, existing=None):
         if end_date == start_date and time_to_min(end_time) <= time_to_min(start_time):
             st.error("종료 시간은 시작 시간 이후여야 합니다.")
             return False, None
-
         return True, {
             "start_date": date_key(start_date.year, start_date.month, start_date.day),
             "end_date":   date_key(end_date.year,   end_date.month,   end_date.day),
-            "start": start_time,
-            "end":   end_time,
-            "name":      name.strip(),
-            "test_name": test_name.strip(),
-            "product":   product.strip(),
+            "start": start_time, "end": end_time,
+            "name": name.strip(), "test_name": test_name.strip(), "product": product.strip(),
         }
-
     return False, None
 
 def save_booking(form_data, exclude_gid=None):
-    """
-    날짜별로 분리해서 저장. 겹침 검사 포함.
-    반환: (success, error_msg)
-    """
     start_date = date_from_key(form_data["start_date"])
     end_date   = date_from_key(form_data["end_date"])
     slots = expand_booking_to_days(start_date, form_data["start"], end_date, form_data["end"])
 
     # 겹침 검사
-    if room_key not in bookings:
-        bookings[room_key] = {}
     for (dk, ds, de) in slots:
         if ds == de:
             continue
-        day_bk = bookings[room_key].get(dk, {})
+        day_bk = bookings.get(room_key, {}).get(dk, {})
         overlap, conflict = is_overlap_day(ds, de, day_bk, exclude_gid=exclude_gid)
         if overlap:
             d_label = dk.replace("-", "/")
             return False, f"⚠️ {d_label} {conflict['start']}~{conflict['end']} ({conflict['name']}) 예약과 시간이 겹칩니다."
 
-    # 기존 group_id 삭제
+    # 기존 삭제 (수정 시)
     if exclude_gid:
-        for dk_val in list(bookings[room_key].keys()):
-            for bid in list(bookings[room_key][dk_val].keys()):
-                if bookings[room_key][dk_val][bid].get("group_id") == exclude_gid:
-                    del bookings[room_key][dk_val][bid]
-            if not bookings[room_key][dk_val]:
-                del bookings[room_key][dk_val]
+        delete_by_group_id(exclude_gid)
 
     # 저장
-    import uuid
     gid = exclude_gid or str(uuid.uuid4())[:8]
     for (dk, ds, de) in slots:
         if ds == de:
             continue
-        if dk not in bookings[room_key]:
-            bookings[room_key][dk] = {}
-        existing_ids = set(bookings[room_key][dk].keys())
-        new_id = 0
-        while str(new_id) in existing_ids:
-            new_id += 1
-        bookings[room_key][dk][str(new_id)] = {
-            "group_id":   gid,
-            "start_date": form_data["start_date"],
-            "end_date":   form_data["end_date"],
-            "start":      ds,
-            "end":        de,
-            "name":       form_data["name"],
-            "test_name":  form_data["test_name"],
-            "product":    form_data["product"],
-        }
+        insert_booking(
+            room=room_key, dk=dk, group_id=gid,
+            start_date=form_data["start_date"], end_date=form_data["end_date"],
+            start_time=ds, end_time=de,
+            name=form_data["name"], test_name=form_data["test_name"], product=form_data["product"]
+        )
 
-    save_bookings(bookings)
-    st.session_state.bookings = bookings
+    refresh_bookings()
     return True, None
 
 # ════════════════════════════════════════════════════════════
@@ -407,9 +412,9 @@ if st.session_state.view == "cal":
 # 뷰 2: 날짜별 현황
 # ════════════════════════════════════════════════════════════
 elif st.session_state.view == "day":
-    y = st.session_state.sel_year
-    m = st.session_state.sel_month
-    d = st.session_state.sel_date
+    y  = st.session_state.sel_year
+    m  = st.session_state.sel_month
+    d  = st.session_state.sel_date
     dk = date_key(y, m, d)
     day_bookings = bookings.get(room_key, {}).get(dk, {})
 
@@ -419,11 +424,10 @@ elif st.session_state.view == "day":
 
     st.markdown(f"## {room_label} &nbsp;·&nbsp; {y}년 {MONTHS_KR[m-1]} {d}일")
     st.divider()
-
     st.markdown("#### 예약 현황")
+
     if day_bookings:
-        # 타임라인 바
-        tl = f'<div style="position:relative;height:40px;background:#f0f0f0;border-radius:8px;margin-bottom:8px;overflow:hidden">'
+        tl = '<div style="position:relative;height:40px;background:#f0f0f0;border-radius:8px;margin-bottom:8px;overflow:hidden">'
         shades = [room_color,"4B5563","6D28D9","B45309","065F46","9D174D"]
         for i, (bid, b) in enumerate(sorted(day_bookings.items(), key=lambda x: time_to_min(x[1]["start"]))):
             sp = time_to_min(b["start"])/1440*100
@@ -445,40 +449,28 @@ elif st.session_state.view == "day":
             is_multi = start_dk != end_dk
             period_label = f"{start_dk.replace('-','/')} {b['start']} ~ {end_dk.replace('-','/')} {b['end']}" if is_multi else f"{b['start']} ~ {b['end']}"
 
-            with st.container():
-                col1, col2, col3 = st.columns([4, 4, 2])
-                with col1:
-                    st.markdown(f"🕐 **{period_label}**")
-                    if is_multi:
-                        st.caption("📌 다일 예약")
-                with col2:
-                    st.markdown(f"👤 {b['name']} &nbsp;·&nbsp; 🧪 {b.get('test_name','')} &nbsp;·&nbsp; 📦 {b.get('product','')}")
-                with col3:
-                    if is_admin:
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.button("수정", key=f"edit_{bid}", use_container_width=True):
-                                st.session_state.edit_group_id = b.get("group_id", bid)
-                                st.session_state.view = "edit"
-                                st.rerun()
-                        with c2:
-                            if st.button("취소", key=f"del_{bid}", type="secondary", use_container_width=True):
-                                gid = b.get("group_id")
-                                if gid:
-                                    # group_id 전체 삭제
-                                    for dk_v in list(bookings[room_key].keys()):
-                                        for bid_v in list(bookings[room_key][dk_v].keys()):
-                                            if bookings[room_key][dk_v][bid_v].get("group_id") == gid:
-                                                del bookings[room_key][dk_v][bid_v]
-                                        if not bookings[room_key][dk_v]:
-                                            del bookings[room_key][dk_v]
-                                else:
-                                    del bookings[room_key][dk][bid]
-                                    if not bookings[room_key][dk]:
-                                        del bookings[room_key][dk]
-                                save_bookings(bookings)
-                                st.session_state.bookings = bookings
-                                st.rerun()
+            col1, col2, col3 = st.columns([4, 4, 2])
+            with col1:
+                st.markdown(f"🕐 **{period_label}**")
+                if is_multi:
+                    st.caption("📌 다일 예약")
+            with col2:
+                st.markdown(f"👤 {b['name']} &nbsp;·&nbsp; 🧪 {b.get('test_name','')} &nbsp;·&nbsp; 📦 {b.get('product','')}")
+            with col3:
+                if is_admin:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("수정", key=f"edit_{bid}", use_container_width=True):
+                            st.session_state.edit_group_id = b.get("group_id", bid)
+                            st.session_state.view = "edit"
+                            st.rerun()
+                    with c2:
+                        if st.button("취소", key=f"del_{bid}", type="secondary", use_container_width=True):
+                            gid = b.get("group_id")
+                            if gid:
+                                delete_by_group_id(gid)
+                            refresh_bookings()
+                            st.rerun()
             st.divider()
     else:
         st.markdown("<p style='color:#aaa'>이 날의 예약이 없습니다.</p>", unsafe_allow_html=True)
